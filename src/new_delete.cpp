@@ -18,10 +18,15 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <new>
 #include <utility>
 #include <vector>
+
+#ifdef _DEBUG
+#include <crtdbg.h>
+#endif
 
 namespace {
 
@@ -82,6 +87,32 @@ bool is_registered_malloc_ptr(void* p) {
         }
     }
     return false;
+}
+
+// Belt-and-braces around every std::free in do_delete. In Debug builds the
+// CRT validates the pointer against its heap (debug_heap.cpp,
+// _CrtIsValidHeapPointer) and asserts if it is not a heap block — a hard
+// "Debug Assertion Failed!" dialog. The registry gates above already make
+// that impossible for pointers that came from our malloc fallback; this
+// second gate makes it structurally impossible even if a misrouted pointer
+// (pool block, foreign memory) ever reaches a free: it leaks with a
+// one-time diagnostic instead of corrupting the heap. Leaking is exactly
+// what the deallocation contract prescribes for unclassifiable pointers.
+void safe_free(void* p) {
+#ifdef _DEBUG
+    if (p != nullptr && !_CrtIsValidHeapPointer(p)) {
+        static std::atomic<bool> reported{false};
+        bool expected = false;
+        if (reported.compare_exchange_strong(expected, true)) {
+            std::fprintf(stderr,
+                         "MemAlloc: refusing to std::free non-heap pointer "
+                         "%p (leaked per deallocation contract)\n",
+                         p);
+        }
+        return;
+    }
+#endif
+    std::free(p);
 }
 
 // Over-aligned allocation before the heap is ready (or during allocator
@@ -164,7 +195,7 @@ void do_delete(void* p) noexcept {
         auto& stash = g_aligned_scratch;
         for (auto it = stash.begin(); it != stash.end(); ++it) {
             if (it->second == p) {
-                std::free(it->first);
+                safe_free(it->first);
                 stash.erase(it);
                 return;
             }
@@ -174,7 +205,7 @@ void do_delete(void* p) noexcept {
         // Pre-main delete of a bootstrap pointer: every allocation before
         // the warm-up flag took the malloc fallback and was registered.
         if (is_registered_malloc_ptr(p)) {
-            std::free(p);
+            safe_free(p);
         }
         return;
     }
@@ -184,7 +215,7 @@ void do_delete(void* p) noexcept {
         // pools/arena no longer exist, so the pointer can only be a malloc
         // fallback pointer (registered) or foreign memory to leave alone.
         if (is_registered_malloc_ptr(p)) {
-            std::free(p);
+            safe_free(p);
         }
         return;
     }
@@ -201,7 +232,7 @@ void do_delete(void* p) noexcept {
         // — a pool block, foreign memory — must NOT be std::free'd: that
         // would corrupt the CRT heap (_CrtIsValidHeapPointer).
         if (is_registered_malloc_ptr(p)) {
-            std::free(p);
+            safe_free(p);
         }
         return;
     }
@@ -213,7 +244,7 @@ void do_delete(void* p) noexcept {
         // per-thread free list cannot safely accept — so it is leaked rather
         // than corrupting the heap.
         if (is_registered_malloc_ptr(p)) {
-            std::free(p);
+            safe_free(p);
         }
         return;
     }
@@ -254,25 +285,6 @@ void operator delete[](void* p, std::size_t, std::align_val_t) noexcept {
 }
 
 namespace memalloc {
-namespace detail {
-
-// Sole definitions of the per-thread flags. This TU (the new/delete
-// override) is the only place the thread_locals live, so every translation
-// unit — operator new here, and the allocator entry points in the headers —
-// shares one instance per thread via the non-inline accessors below.
-thread_local bool g_allocator_active = false;
-thread_local bool g_allocator_gone = false;
-
-bool& allocator_active_flag() { return g_allocator_active; }
-
-// Sticky: once a thread's allocator is destroyed, it stays "gone" for the
-// rest of that thread's life (thread exit / process exit). Exit-time
-// deletes that would otherwise call instance() on the destroyed object are
-// routed to the malloc-fallback path instead.
-void mark_allocator_gone() { g_allocator_gone = true; }
-bool allocator_gone() { return g_allocator_gone; }
-
-}  // namespace detail
 
 // Warms the heap and flips the bootstrap flag. Call at the very start of
 // main(), before any user allocation. Constructing the allocator eagerly

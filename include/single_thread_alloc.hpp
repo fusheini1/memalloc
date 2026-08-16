@@ -8,6 +8,7 @@
 #include "block_pool.hpp"
 #include "central_heap.hpp"
 #include "size_class.hpp"
+#include "stats.hpp"
 
 #include <algorithm>
 #include <cstddef>
@@ -52,11 +53,19 @@ public:
 
     void* allocate(std::size_t n) {
         if (n > MAX_SMALL) {
-            return arena_.allocate(n);
+            // Large path: the Arena's actual consumption is its used-delta
+            // (requested bytes + alignment padding).
+            const std::size_t before = arena_.used();
+            void* p = arena_.allocate(n);
+            if (p != nullptr) {
+                stats_.record_alloc(n, arena_.used() - before);
+            }
+            return p;
         }
         const std::size_t index = size_class_index(n);
         void* p = pool_allocate(index);
         if (p != nullptr) {
+            stats_.record_alloc(n, SIZE_CLASSES[index]);
             return p;
         }
         // Pool exhausted: refill it with a fresh chunk, then retry. This is
@@ -65,7 +74,11 @@ public:
             void* chunk = chunk_source_(SIZE_CLASSES[index], chunk_source_user_);
             if (chunk != nullptr) {
                 pool_add_external_slab(index, chunk);
-                return pool_allocate(index);
+                void* q = pool_allocate(index);
+                if (q != nullptr) {
+                    stats_.record_alloc(n, SIZE_CLASSES[index]);
+                }
+                return q;
             }
         }
         return nullptr;
@@ -75,7 +88,9 @@ public:
         if (n > MAX_SMALL) {
             return;  // the Arena has no per-object free
         }
-        pool_deallocate(size_class_index(n), p);
+        const std::size_t index = size_class_index(n);
+        stats_.record_free(n, SIZE_CLASSES[index]);
+        pool_deallocate(index, p);
     }
 
     // Like deallocate() but resolves the containing block start itself, for
@@ -85,7 +100,9 @@ public:
         if (n > MAX_SMALL) {
             return;  // the Arena has no per-object free
         }
-        pool_deallocate_containing(size_class_index(n), p);
+        const std::size_t index = size_class_index(n);
+        stats_.record_free(n, SIZE_CLASSES[index]);
+        pool_deallocate_containing(index, p);
     }
 
     // Sentinel returned by classify() for pointers owned by the Arena
@@ -112,9 +129,18 @@ public:
     // Arena: bump allocation natively honors arbitrary power-of-two
     // alignment. Trade-off: arena memory is only released when the
     // allocator dies (no per-object free) — acceptable for this workload.
+    // Recorded like the large path; the matching free is a no-op by design.
     void* allocate_aligned(std::size_t n, std::size_t alignment) {
-        return arena_.allocate(n, alignment);
+        const std::size_t before = arena_.used();
+        void* p = arena_.allocate(n, alignment);
+        if (p != nullptr) {
+            stats_.record_alloc(n, arena_.used() - before);
+        }
+        return p;
     }
+
+    // Aggregated allocation statistics for this thread's allocator.
+    const Stats& stats() const { return stats_; }
 
 private:
     using Pools = std::tuple<
@@ -220,6 +246,7 @@ private:
 
     Pools pools_;
     Arena arena_;
+    Stats stats_;
     ChunkSource chunk_source_;
     void* chunk_source_user_;
 };

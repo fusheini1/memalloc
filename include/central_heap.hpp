@@ -24,11 +24,12 @@ namespace detail {
 // malloc fallback instead of re-entering the allocator, which would deadlock
 // on the CentralHeap mutex.
 //
-// Declared here but DEFINED in src/new_delete.cpp: the thread_local lives in
-// exactly one translation unit. Inline thread_local data (whether a
+// Declared here but DEFINED in src/thread_state.cpp: the thread_local lives
+// in exactly one translation unit. Inline thread_local data (whether a
 // namespace-scope variable or a static local of an inline function) is
 // unreliable on MSVC when the header is included from several TUs, so the
-// single definition lives with the override that consumes it.
+// single definition lives in a dedicated state TU that every memalloc_core
+// consumer links.
 bool& allocator_active_flag();
 
 // Sticky per-thread flags recorded when a thread's ThreadPoolAlloc is

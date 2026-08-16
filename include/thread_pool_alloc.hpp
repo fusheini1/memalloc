@@ -6,6 +6,7 @@
 
 #include "central_heap.hpp"
 #include "single_thread_alloc.hpp"
+#include "stats.hpp"
 
 #include <atomic>
 #include <cstddef>
@@ -84,13 +85,22 @@ public:
     std::size_t alloc_count() const { return alloc_count_; }
     std::size_t free_count() const { return free_count_; }
 
+    // This thread's allocation statistics (the live entry in the global
+    // registry; retired as a snapshot when this allocator is destroyed).
+    const Stats& stats() const { return alloc_.stats(); }
+
 private:
     // CentralHeap is a singleton, so no user data is needed.
     static void* acquire_chunk_cb(std::size_t size_class_bytes, void* /*user*/) {
         return CentralHeap::instance().acquire_chunk(size_class_bytes);
     }
 
-    ThreadPoolAlloc() : alloc_(acquire_chunk_cb, nullptr) {}
+    ThreadPoolAlloc() : alloc_(acquire_chunk_cb, nullptr) {
+        // Registered while the construction-time guard (set by instance())
+        // is active, so the registry's vector growth takes the malloc
+        // fallback instead of recursing into this very allocator.
+        detail::register_stats(&alloc_.stats());
+    }
 
     ~ThreadPoolAlloc() {
         dying_.store(true, std::memory_order_relaxed);
@@ -101,6 +111,12 @@ private:
         // fallback path instead of calling instance()/classify() on the
         // destroyed object.
         detail::mark_allocator_gone();
+        // Teardown publishing: snapshot this thread's Stats into the global
+        // retired list (the Stats object dies with alloc_ below). The guard
+        // makes the registry's vector growth use the malloc fallback — no
+        // recursion into the allocator mid-destruction.
+        detail::AllocatorGuard guard;
+        detail::retire_stats(&alloc_.stats());
     }
 
     // Declared BEFORE alloc_ so it outlives it: member destruction runs in
