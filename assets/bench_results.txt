@@ -1,0 +1,23 @@
+=== MemAlloc benchmarks ===
+hardware_concurrency = 12
+OS = Windows
+compiler = MSVC (_MSC_VER=1950)
+config = Release (-O2)
+
+(a) single-thread alloc/free latency   (2000000 pairs, ns/op)
+  allocator                       min     median
+  ThreadPoolAlloc               12.92      13.05
+  std::malloc/free              42.97      47.43
+  ::operator new/delete         45.81      48.53
+
+(b) multi-thread scaling   (2000000 pairs total, split evenly)
+  threads custom ns/op     custom speedup  malloc ns/op     malloc speedup 
+  1       13.91            0.97            45.14            1.20           
+  2       15.28            1.77            54.63            1.99           
+  4       16.91            3.19            66.81            3.25           
+  8       22.22            4.86            87.04            4.99           
+
+(c) cache-locality traversal   (500,000 x 64 B structs, ns/elem)
+  path                            min     median
+  ThreadPoolAlloc (slabs)       4.502      5.253
+  std::malloc (scattered)       6.075      6.351

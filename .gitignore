@@ -1,2 +1,20 @@
+# Build output
 build/
+*.o
+*.obj
+*.exe
+*.ilk
+*.pdb
+
+# Editors / IDEs
+.vs/
+.idea/
+.cache/
+.freebuff/
+
+# OS cruft
+.DS_Store
+Thumbs.db
+
+# Misc logs
 *.log
