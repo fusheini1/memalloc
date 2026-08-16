@@ -10,7 +10,6 @@ build/
 .vs/
 .idea/
 .cache/
-.freebuff/
 
 # OS cruft
 .DS_Store

@@ -144,7 +144,10 @@ int main() {
 
 From `assets/bench_results.txt` (Windows, MSVC 1950, 12 logical cores,
 Release `-O2`; `bench` links only the allocator core — no new/delete
-override — so `std::malloc`/`::operator new` are the system allocators):
+override — so `std::malloc`/`::operator new` are the system allocators).
+The `frag%` column is the custom allocator's runtime internal
+fragmentation for that workload (delta of the `Stats` counters across the
+run; `n/a` for the system allocators, which have no MemAlloc stats):
 
 ```
 === MemAlloc benchmarks ===
@@ -154,29 +157,35 @@ compiler = MSVC (_MSC_VER=1950)
 config = Release (-O2)
 
 (a) single-thread alloc/free latency   (2000000 pairs, ns/op)
-  allocator                       min     median
-  ThreadPoolAlloc               12.92      13.05
-  std::malloc/free              42.97      47.43
-  ::operator new/delete         45.81      48.53
+  allocator                       min     median    frag%
+  ThreadPoolAlloc               11.64      12.44    0.00%
+  std::malloc/free              40.84      42.75      n/a
+  ::operator new/delete         41.05      46.50      n/a
 
 (b) multi-thread scaling   (2000000 pairs total, split evenly)
-  threads custom ns/op     custom speedup  malloc ns/op     malloc speedup
-  1       13.91            0.97            45.14            1.20
-  2       15.28            1.77            54.63            1.99
-  4       16.91            3.19            66.81            3.25
-  8       22.22            4.86            87.04            4.99
+  threads custom ns/op     custom speedup  malloc ns/op     malloc speedup  custom frag%
+  1       12.05            1.15            41.96            0.97                  0.00%
+  2       12.38            2.24            51.95            1.57                  0.00%
+  4       17.30            3.21            68.23            2.39                  0.00%
+  8       20.89            5.32            74.49            4.38                  0.00%
 
 (c) cache-locality traversal   (500,000 x 64 B structs, ns/elem)
-  path                            min     median
-  ThreadPoolAlloc (slabs)       4.502      5.253
-  std::malloc (scattered)       6.075      6.351
+  path                            min     median    frag%
+  ThreadPoolAlloc (slabs)       3.618      4.269    0.00%
+  std::malloc (scattered)       5.233      5.434      n/a
 ```
+
+The workloads request *exact* size classes (16/64/256/1024 bytes and a
+64-byte struct), so rounding waste is 0% by construction — the frag% column
+quantifies the allocator's tight fit at full speed. A mixed-size workload
+shows the real rounding cost: `frag_report` measures ~17% on its
+17/65/129/500/900-byte mix, matching the predicted (class−size)/class math.
 
 MemAlloc wins where the design predicts: ~3.3–3.6x faster single-thread
 latency (free-list pop/push beats malloc's metadata search and bin
 bookkeeping) and better absolute per-op latency at every thread count
 (per-thread pools never fight over a heap lock). The locality path is
-~17–26% faster on traversal because blocks carved from contiguous slabs
+~21–27% faster on traversal because blocks carved from contiguous slabs
 prefetch and page-walk better than scattered malloc blocks. Both allocators
 show per-op inflation at 8 threads — that is SMT sharing, since 8 workers
 exceed the machine's 6 physical cores, not allocator contention: the

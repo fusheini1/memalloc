@@ -2,6 +2,12 @@
 // Author: Fusheini Abdul-Mumin <abdulmuminfusheini@gmail.com>
 // License: MIT
 
+// fopen is deprecated under MSVC's secure-CRT noise; we want the portable
+// std::fopen form here.
+#ifdef _MSC_VER
+#define _CRT_SECURE_NO_WARNINGS
+#endif
+
 // Benchmarks: MemAlloc (ThreadPoolAlloc) vs the system allocator.
 //
 // IMPORTANT: this executable links ONLY memalloc_core (which transitively
@@ -55,6 +61,21 @@ struct Timing {
     double min;
     double median;
 };
+
+// Fragmentation of a single workload, measured as the delta of the
+// allocator's cumulative Stats across it (the Stats are lifetime totals, so
+// the delta isolates exactly the workload run in between):
+//   (allocated_delta - requested_delta) / allocated_delta, 0 if empty.
+// Exact size-class requests yield 0.0 — the workloads below use sizes that
+// ARE size classes, so the rounding waste is zero by construction.
+double delta_frag(const memalloc::Stats& before, const memalloc::Stats& after) {
+    const std::size_t req = after.requested - before.requested;
+    const std::size_t got = after.allocated - before.allocated;
+    if (got == 0) {
+        return 0.0;
+    }
+    return static_cast<double>(got - req) / static_cast<double>(got);
+}
 
 // One untimed warmup run, then kTrials timed runs of f(); returns min/median.
 template <typename F>
@@ -233,20 +254,28 @@ int main() {
     print_compiler(out);
     print_line(out, "config = Release (-O2)\n\n");
 
-    // (a) single-thread alloc/free latency.
+    // (a) single-thread alloc/free latency. The frag% column is the custom
+    // allocator's internal fragmentation for the workload (the system
+    // allocators have no MemAlloc Stats).
     print_line(out, "(a) single-thread alloc/free latency   (%zu pairs, ns/op)\n",
                static_cast<std::size_t>(kTotalOps));
-    print_line(out, "  %-24s %10s %10s\n", "allocator", "min", "median");
+    print_line(out, "  %-24s %10s %10s %8s\n", "allocator", "min", "median",
+               "frag%");
 
+    const memalloc::Stats stats_before_a =
+        memalloc::ThreadPoolAlloc::instance().stats();
     const Timing custom_a = measure([] {
         op_loop<true>(kTotalOps);
     });
-    print_line(out, "  %-24s %10.2f %10.2f\n", "ThreadPoolAlloc",
-               custom_a.min / kTotalOps, custom_a.median / kTotalOps);
+    const memalloc::Stats stats_after_a =
+        memalloc::ThreadPoolAlloc::instance().stats();
+    print_line(out, "  %-24s %10.2f %10.2f %7.2f%%\n", "ThreadPoolAlloc",
+               custom_a.min / kTotalOps, custom_a.median / kTotalOps,
+               delta_frag(stats_before_a, stats_after_a) * 100.0);
 
     const Timing malloc_a = measure([] { op_loop<false>(kTotalOps); });
-    print_line(out, "  %-24s %10.2f %10.2f\n", "std::malloc/free",
-               malloc_a.min / kTotalOps, malloc_a.median / kTotalOps);
+    print_line(out, "  %-24s %10.2f %10.2f %8s\n", "std::malloc/free",
+               malloc_a.min / kTotalOps, malloc_a.median / kTotalOps, "n/a");
 
     const Timing new_a = measure([] {
         for (std::size_t i = 0; i < kTotalOps; ++i) {
@@ -255,43 +284,56 @@ int main() {
             ::operator delete(p);
         }
     });
-    print_line(out, "  %-24s %10.2f %10.2f\n", "::operator new/delete",
-               new_a.min / kTotalOps, new_a.median / kTotalOps);
+    print_line(out, "  %-24s %10.2f %10.2f %8s\n", "::operator new/delete",
+               new_a.min / kTotalOps, new_a.median / kTotalOps, "n/a");
     print_line(out, "\n");
 
     // (b) multi-thread scaling.
     print_line(out, "(b) multi-thread scaling   (%zu pairs total, split evenly)\n",
                static_cast<std::size_t>(kTotalOps));
-    print_line(out, "  %-7s %-16s %-15s %-16s %-15s\n", "threads",
+    print_line(out, "  %-7s %-16s %-15s %-16s %-15s %-12s\n", "threads",
                "custom ns/op", "custom speedup", "malloc ns/op",
-               "malloc speedup");
+               "malloc speedup", "custom frag%");
     const std::size_t threads[] = {1, 2, 4, 8};
     // T=1 wall time is the speedup baseline for every other thread count.
     const double base_custom = scaling<true>(1).median;
     const double base_malloc = scaling<false>(1).median;
     for (const std::size_t t : threads) {
+        // global_stats() before/after each row isolates that thread count's
+        // contribution (worker allocators are retired when the threads exit).
+        const memalloc::Stats g_before = memalloc::global_stats();
         const Timing c = scaling<true>(t);
+        const memalloc::Stats g_after_custom = memalloc::global_stats();
         const Timing m = scaling<false>(t);
+        const memalloc::Stats g_after = memalloc::global_stats();
         const double per_thread_ops = static_cast<double>(kTotalOps) / t;
-        print_line(out, "  %-7zu %-16.2f %-15.2f %-16.2f %-15.2f\n", t,
+        print_line(out, "  %-7zu %-16.2f %-15.2f %-16.2f %-15.2f %10.2f%%\n",
+                   t,
                    c.median / per_thread_ops,
                    base_custom / c.median,
                    m.median / per_thread_ops,
-                   base_malloc / m.median);
+                   base_malloc / m.median,
+                   delta_frag(g_before, g_after_custom) * 100.0);
+        (void)g_after;  // the malloc row adds no MemAlloc stats
     }
     print_line(out, "\n");
 
     // (c) cache-locality traversal.
     print_line(out,
                "(c) cache-locality traversal   (500,000 x 64 B structs, ns/elem)\n");
-    print_line(out, "  %-24s %10s %10s\n", "path", "min", "median");
+    print_line(out, "  %-24s %10s %10s %8s\n", "path", "min", "median",
+               "frag%");
     std::int64_t sink = 0;
+    const memalloc::Stats c_before =
+        memalloc::ThreadPoolAlloc::instance().stats();
     const Timing c_a = locality<true>(sink);
-    print_line(out, "  %-24s %10.3f %10.3f\n", "ThreadPoolAlloc (slabs)",
-               c_a.min, c_a.median);
+    const memalloc::Stats c_after =
+        memalloc::ThreadPoolAlloc::instance().stats();
+    print_line(out, "  %-24s %10.3f %10.3f %7.2f%%\n", "ThreadPoolAlloc (slabs)",
+               c_a.min, c_a.median, delta_frag(c_before, c_after) * 100.0);
     const Timing c_b = locality<false>(sink);
-    print_line(out, "  %-24s %10.3f %10.3f\n", "std::malloc (scattered)",
-               c_b.min, c_b.median);
+    print_line(out, "  %-24s %10.3f %10.3f %8s\n", "std::malloc (scattered)",
+               c_b.min, c_b.median, "n/a");
     (void)sink;
 
     if (out != nullptr) {
