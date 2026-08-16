@@ -227,6 +227,20 @@ public:
 
     std::size_t capacity() const { return BlocksPerSlab; }
 
+    // Total number of blocks this pool manages: the constructor slab plus
+    // every external slab linked via add_external_slab(). Used by the
+    // visualizer's occupancy snapshot — used = total - free_count stays
+    // non-negative even after chunk refills have grown the pool past its
+    // original slab. capacity() deliberately remains BlocksPerSlab for
+    // tests that assert the initial slab size.
+    std::size_t total_blocks() const {
+        std::size_t total = BlocksPerSlab;
+        for (const ExternalSlab& s : external_slabs_) {
+            total += s.num_blocks;
+        }
+        return total;
+    }
+
     // True if `p` is a block start inside the constructor slab or any
     // external slab. Used by deallocate() to validate, and exposed publicly
     // so the global new/delete override can classify a pointer before

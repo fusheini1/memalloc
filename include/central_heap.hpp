@@ -5,6 +5,7 @@
 #pragma once
 
 #include "block_pool.hpp"  // reuse detail::allocate_slab / free_slab
+#include "viz_hook.hpp"     // slow-path chunk events for the visualizer
 
 #include <atomic>
 #include <cstddef>
@@ -97,7 +98,10 @@ public:
     // The re-entrancy guard is set because chunks_.push_back() below may
     // grow the vector through operator new while the mutex is held; without
     // the guard that nested new would re-enter the allocator and deadlock.
-    void* acquire_chunk(std::size_t size_class_bytes) {
+    // `thread_id` is the acquiring thread's viz id (from the chunk-source
+    // callback), used only to tag the kind=2 event in the visualizer feed.
+    void* acquire_chunk(std::size_t size_class_bytes,
+                        std::uint32_t thread_id = 0) {
         detail::AllocatorGuard guard;
         std::lock_guard<std::mutex> lock(mutex_);
         detail::SlabAlloc s = detail::allocate_slab(CHUNK_SIZE, CHUNK_SIZE);
@@ -110,7 +114,15 @@ public:
         header->block_size = size_class_bytes;
         chunks_.push_back(s.raw);  // the raw pointer we must free
         total_chunks_.fetch_add(1, std::memory_order_relaxed);
-        return static_cast<char*>(base) + kHeaderOffset;
+        void* body = static_cast<char*>(base) + kHeaderOffset;
+        // Slow-path event for the visualizer (only when recording is on).
+        if (memalloc::viz::enabled()) {
+            memalloc::viz::ring().push(
+                {memalloc::viz::now_ns(), CHUNK_SIZE,
+                 reinterpret_cast<std::uintptr_t>(body), thread_id,
+                 memalloc::viz::kEventChunk});
+        }
+        return body;
     }
 
     // Recover the header that owns a body pointer by masking off the low

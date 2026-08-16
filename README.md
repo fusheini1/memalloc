@@ -6,7 +6,7 @@ pools with a lock-free fast path, a central heap for refills, and a global
 
 ## Overview
 
-Most programs never think about `malloc` — and pay for it. The system
+Most programs never think about `malloc` and pay for it. The system
 allocator is general-purpose: it must serve any size, any alignment, from
 any thread, and it defends against concurrent access with locks and
 fine-grained binning. That generality costs latency and causes cache-line

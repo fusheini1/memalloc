@@ -85,6 +85,10 @@ namespace detail {
 struct StatsRegistry {
     std::mutex mutex;
     std::vector<const Stats*> live;
+    // Parallel to `live`: the owning allocator object for each live Stats.
+    // Kept as opaque pointers so this header never needs to name
+    // ThreadPoolAlloc (no circular include); for_each_live() casts them.
+    std::vector<const void*> live_allocators;
     std::vector<Stats> retired;
 };
 
@@ -93,24 +97,46 @@ inline StatsRegistry& stats_registry() {
     return r;
 }
 
-inline void register_stats(const Stats* s) {
+inline void register_stats(const Stats* s, const void* allocator) {
     std::lock_guard<std::mutex> lock(stats_registry().mutex);
     stats_registry().live.push_back(s);
+    stats_registry().live_allocators.push_back(allocator);
 }
 
 // Snapshots `s` into the retired list (its storage is about to die) and
-// removes it from the live registry.
+// removes it (and its allocator) from the live registry.
 inline void retire_stats(const Stats* s) {
     std::lock_guard<std::mutex> lock(stats_registry().mutex);
     StatsRegistry& reg = stats_registry();
     reg.retired.push_back(*s);
     const auto it = std::find(reg.live.begin(), reg.live.end(), s);
     if (it != reg.live.end()) {
+        const std::size_t index = static_cast<std::size_t>(it - reg.live.begin());
         reg.live.erase(it);
+        reg.live_allocators.erase(reg.live_allocators.begin() +
+                                  static_cast<std::ptrdiff_t>(index));
     }
 }
 
 }  // namespace detail
+
+// Forward declaration so for_each_live() can hand callers a typed
+// reference without including the full allocator header (no circularity).
+class ThreadPoolAlloc;
+
+// Calls `fn` with every currently-LIVE allocator (threads whose allocator
+// has not been destroyed yet). Locked while fn runs, so fn must NOT call
+// back into the registry (register_stats/retire_stats/global_stats/
+// for_each_live). Reading a live allocator's stats/occupancy while its
+// owning thread mutates them is the same benign race global_stats()
+// accepts: aligned size_t reads never tear on the supported platforms.
+inline void for_each_live(void (*fn)(const ThreadPoolAlloc&, void*),
+                          void* user) {
+    std::lock_guard<std::mutex> lock(detail::stats_registry().mutex);
+    for (const void* a : detail::stats_registry().live_allocators) {
+        fn(*static_cast<const ThreadPoolAlloc*>(a), user);
+    }
+}
 
 // Sum of every thread's Stats: retired snapshots plus live threads. Safe to
 // call from any thread at any time. A live Stats may be modified by its

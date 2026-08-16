@@ -2,6 +2,10 @@ cmake_minimum_required(VERSION 3.16)
 
 project(MemAlloc VERSION 0.1.0 LANGUAGES CXX)
 
+# Optional ImGui + GLFW/OpenGL visualizer (Step 9.1). OFF by default so
+# default builds stay dependency-free (no network, no external deps).
+option(MEMALLOC_BUILD_VIZ "Build the ImGui visualizer" OFF)
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -64,6 +68,19 @@ memalloc_add_test(test_threaded)
 memalloc_add_test(test_new_override)
 memalloc_add_test(test_frag)
 
+# test_viz_hook: memalloc_core only (no new/delete override), same asserts
+# discipline as the other tests.
+add_executable(test_viz_hook tests/test_viz_hook.cpp)
+target_link_libraries(test_viz_hook PRIVATE memalloc_core)
+if(NOT WIN32)
+    target_link_libraries(test_viz_hook PRIVATE Threads::Threads)
+endif()
+if(MSVC)
+    target_compile_options(test_viz_hook PRIVATE /UNDEBUG)
+else()
+    target_compile_options(test_viz_hook PRIVATE -UNDEBUG)
+endif()
+
 # Benchmarks: links ONLY memalloc_core (which transitively brings the tiny
 # thread-state TU). Deliberately NOT memalloc_newdel, so ::operator new and
 # std::malloc remain the SYSTEM allocators for the comparison. Built and run
@@ -88,10 +105,68 @@ else()
     target_compile_options(frag_report PRIVATE -UNDEBUG)
 endif()
 
+# Viz-hook instrumentation test (Step 9.2): links memalloc_core ONLY — no
+# new/delete override — so it exercises recording/occupancy/for_each_live
+# against the plain ThreadPoolAlloc API with system malloc as its baseline.
 enable_testing()
+
 add_test(NAME test_arena COMMAND test_arena)
 add_test(NAME test_block_pool COMMAND test_block_pool)
 add_test(NAME test_size_class COMMAND test_size_class)
 add_test(NAME test_threaded COMMAND test_threaded)
 add_test(NAME test_new_override COMMAND test_new_override)
 add_test(NAME test_frag COMMAND test_frag)
+add_test(NAME test_viz_hook COMMAND test_viz_hook)
+
+# ---------------------------------------------------------------------------
+# Optional ImGui visualizer (Step 9.1). Only configured when
+# MEMALLOC_BUILD_VIZ=ON; the default build never touches this block, so
+# GLFW/ImGui (fetched from GitHub at configure time) are not required.
+# The visualizer does NOT modify the core allocator or any existing tests.
+# ---------------------------------------------------------------------------
+if(MEMALLOC_BUILD_VIZ)
+    include(FetchContent)
+
+    FetchContent_Declare(glfw
+        GIT_REPOSITORY https://github.com/glfw/glfw.git
+        GIT_TAG 3.4)
+    set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
+    set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(glfw)
+
+    FetchContent_Declare(imgui
+        GIT_REPOSITORY https://github.com/ocornut/imgui.git
+        GIT_TAG v1.90.9)
+    FetchContent_MakeAvailable(imgui)
+
+    # ImGui has no CMake target by default; build it from source.
+    add_library(imgui STATIC
+        ${imgui_SOURCE_DIR}/imgui.cpp
+        ${imgui_SOURCE_DIR}/imgui_draw.cpp
+        ${imgui_SOURCE_DIR}/imgui_tables.cpp
+        ${imgui_SOURCE_DIR}/imgui_widgets.cpp
+        ${imgui_SOURCE_DIR}/imgui_demo.cpp
+        ${imgui_SOURCE_DIR}/backends/imgui_impl_glfw.cpp
+        ${imgui_SOURCE_DIR}/backends/imgui_impl_opengl3.cpp)
+    target_include_directories(imgui PUBLIC
+        ${imgui_SOURCE_DIR} ${imgui_SOURCE_DIR}/backends)
+    if(WIN32)
+        target_link_libraries(imgui PUBLIC glfw opengl32)
+    else()
+        find_package(OpenGL REQUIRED)
+        target_link_libraries(imgui PUBLIC glfw OpenGL::GL)
+    endif()
+    # Third-party sources: silence their warnings so the viz build reports
+    # only our own code's warnings.
+    if(MSVC)
+        target_compile_options(imgui PRIVATE /w)
+    else()
+        target_compile_options(imgui PRIVATE -w)
+    endif()
+
+    # The visualizer links the allocator core (NOT the new/delete override)
+    # and does not modify any allocator code.
+    add_executable(memalloc_viz viz/main.cpp)
+    target_link_libraries(memalloc_viz PRIVATE imgui memalloc_core)
+endif()

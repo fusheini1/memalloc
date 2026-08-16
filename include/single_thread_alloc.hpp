@@ -142,6 +142,27 @@ public:
     // Aggregated allocation statistics for this thread's allocator.
     const Stats& stats() const { return stats_; }
 
+    // Per-class pool occupancy for the visualizer: free/total per size
+    // class plus the arena's live and total bytes. `cap` is the pool's
+    // TOTAL block count (constructor slab + any external slabs linked by
+    // chunk refills), so used = cap - free_count is never negative. Costs
+    // one O(n) free-list walk per pool, so it is for display, not the hot
+    // path.
+    struct Occupancy {
+        std::size_t free_count[NUM_CLASSES] = {};
+        std::size_t cap[NUM_CLASSES] = {};
+        std::size_t arena_used = 0;
+        std::size_t arena_cap = 0;
+    };
+
+    Occupancy occupancy() const {
+        Occupancy occ;
+        occ.arena_used = arena_.used();
+        occ.arena_cap = arena_.capacity();
+        fill_occupancy(occ, std::make_index_sequence<NUM_CLASSES>{});
+        return occ;
+    }
+
 private:
     using Pools = std::tuple<
         BlockPool<16>, BlockPool<32>, BlockPool<64>, BlockPool<128>,
@@ -202,6 +223,13 @@ private:
         static constexpr FreeFn table[] = {
             &SingleThreadAllocator::pool_deallocate_containing_at<Is>...};
         (this->*table[index])(p);
+    }
+
+    template <std::size_t... Is>
+    void fill_occupancy(Occupancy& occ, std::index_sequence<Is...>) const {
+        ((occ.free_count[Is] = std::get<Is>(pools_).free_count(),
+          occ.cap[Is] = std::get<Is>(pools_).total_blocks()),
+         ...);
     }
 
     template <std::size_t... Is>

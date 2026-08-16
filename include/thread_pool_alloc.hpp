@@ -7,6 +7,7 @@
 #include "central_heap.hpp"
 #include "single_thread_alloc.hpp"
 #include "stats.hpp"
+#include "viz_hook.hpp"
 
 #include <atomic>
 #include <cstddef>
@@ -57,7 +58,17 @@ public:
         // / deadlock) and, worse, its buffer would be a pool block that
         // teardown would wrongly std::free.
         detail::AllocatorGuard guard;
-        return alloc_.allocate(n);
+        void* p = alloc_.allocate(n);
+        // Viz instrumentation (Step 9.2): one relaxed atomic load when
+        // disabled, so the default build pays ~nothing. Only successful
+        // allocations are recorded.
+        if (memalloc::viz::enabled() && p != nullptr) {
+            memalloc::viz::ring().push(
+                {memalloc::viz::now_ns(), n,
+                 reinterpret_cast<std::uintptr_t>(p), thread_id_,
+                 memalloc::viz::kEventAlloc});
+        }
+        return p;
     }
 
     // Over-aligned requests ride the Arena (no per-object free).
@@ -69,12 +80,24 @@ public:
     void deallocate(void* p, std::size_t n) {
         ++free_count_;  // ditto — no synchronization needed
         alloc_.deallocate(p, n);
+        if (memalloc::viz::enabled() && p != nullptr) {
+            memalloc::viz::ring().push(
+                {memalloc::viz::now_ns(), n,
+                 reinterpret_cast<std::uintptr_t>(p), thread_id_,
+                 memalloc::viz::kEventFree});
+        }
     }
 
     // Frees the block containing `p` (handles delete[] cookie offsets).
     void deallocate_containing(void* p, std::size_t n) {
         ++free_count_;
         alloc_.deallocate_containing(p, n);
+        if (memalloc::viz::enabled() && p != nullptr) {
+            memalloc::viz::ring().push(
+                {memalloc::viz::now_ns(), n,
+                 reinterpret_cast<std::uintptr_t>(p), thread_id_,
+                 memalloc::viz::kEventFree});
+        }
     }
 
     // Ownership classification used by the global new/delete override
@@ -89,17 +112,32 @@ public:
     // registry; retired as a snapshot when this allocator is destroyed).
     const Stats& stats() const { return alloc_.stats(); }
 
+    // Per-class pool occupancy snapshot, forwarded from the underlying
+    // SingleThreadAllocator (for the visualizer).
+    using Occupancy = SingleThreadAllocator::Occupancy;
+    Occupancy occupancy() const { return alloc_.occupancy(); }
+
+    // Stable small id for the visualizer, unique per live thread.
+    std::uint32_t thread_id() const { return thread_id_; }
+
 private:
-    // CentralHeap is a singleton, so no user data is needed.
-    static void* acquire_chunk_cb(std::size_t size_class_bytes, void* /*user*/) {
-        return CentralHeap::instance().acquire_chunk(size_class_bytes);
+    // The `user` pointer carries this thread's viz id (set in the ctor) so
+    // the slow-path chunk event is tagged with the acquiring thread.
+    static void* acquire_chunk_cb(std::size_t size_class_bytes, void* user) {
+        const std::uint32_t tid = static_cast<std::uint32_t>(
+            reinterpret_cast<std::uintptr_t>(user));
+        return CentralHeap::instance().acquire_chunk(size_class_bytes, tid);
     }
 
-    ThreadPoolAlloc() : alloc_(acquire_chunk_cb, nullptr) {
+    ThreadPoolAlloc()
+        : thread_id_(memalloc::viz::next_thread_id()),
+          alloc_(acquire_chunk_cb,
+                 reinterpret_cast<void*>(
+                     static_cast<std::uintptr_t>(thread_id_))) {
         // Registered while the construction-time guard (set by instance())
         // is active, so the registry's vector growth takes the malloc
         // fallback instead of recursing into this very allocator.
-        detail::register_stats(&alloc_.stats());
+        detail::register_stats(&alloc_.stats(), this);
     }
 
     ~ThreadPoolAlloc() {
@@ -123,6 +161,9 @@ private:
     // reverse declaration order, and the deletes during alloc_'s teardown
     // (vector buffers) must still observe the flag as true.
     std::atomic<bool> dying_{false};
+    // Declared before alloc_ because the ctor passes this thread's viz id
+    // to the chunk source (via the `user` pointer).
+    std::uint32_t thread_id_ = 0;  // viz id, assigned once in the ctor
     SingleThreadAllocator alloc_;
     std::size_t alloc_count_ = 0;
     std::size_t free_count_ = 0;
