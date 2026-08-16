@@ -1,10 +1,14 @@
 # Build output
 build/
+build-viz/
 *.o
 *.obj
 *.exe
 *.ilk
 *.pdb
+
+# ImGui runtime config (written next to the viz executable)
+imgui.ini
 
 # Editors / IDEs
 .vs/

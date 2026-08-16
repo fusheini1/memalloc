@@ -71,7 +71,8 @@ memalloc/
 │   ├── size_class.hpp        # size classes + constexpr block_for()
 │   ├── single_thread_alloc.hpp  # pools tuple + arena + chunk source
 │   ├── stats.hpp             # Stats, global registry, global_stats()
-│   └── thread_pool_alloc.hpp # thread-local front end (alignas(64))
+│   ├── thread_pool_alloc.hpp # thread-local front end (alignas(64))
+│   └── viz_hook.hpp          # instrumentation ring for the visualizer
 ├── src/
 │   ├── frag_report.cpp       # fragmentation report executable
 │   ├── new_delete.cpp        # global operator new/delete overrides
@@ -82,12 +83,16 @@ memalloc/
 │   ├── test_size_class.cpp   # constexpr routing + allocator
 │   ├── test_threaded.cpp     # 8-thread churn + uniqueness
 │   ├── test_new_override.cpp # new/delete override + refill phase
-│   └── test_frag.cpp         # fragmentation bounds
+│   ├── test_frag.cpp         # fragmentation bounds
+│   └── test_viz_hook.cpp     # viz instrumentation recording/occupancy
+├── viz/
+│   └── main.cpp              # optional ImGui visualizer (build-viz)
 ├── bench/
 │   └── bench.cpp             # custom vs system allocator benchmarks
 └── assets/
     ├── architecture.png
-    └── bench_results.txt
+    ├── bench_results.txt
+    └── viz_screenshot.png
 ```
 
 ## Build
@@ -97,7 +102,7 @@ CMake (Visual Studio generators, MinGW, Linux, macOS):
 ```sh
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
-ctest --test-dir build        # Debug and Release: all 6 tests pass
+ctest --test-dir build        # Debug and Release: all 7 tests pass
 ```
 
 Plain `g++` one-liners (Linux/macOS/MinGW):
@@ -190,6 +195,36 @@ prefetch and page-walk better than scattered malloc blocks. Both allocators
 show per-op inflation at 8 threads — that is SMT sharing, since 8 workers
 exceed the machine's 6 physical cores, not allocator contention: the
 custom fast path shares no state between threads.
+
+## Visualizer
+
+An optional Dear ImGui + GLFW/OpenGL GUI (guarded by
+`MEMALLOC_BUILD_VIZ=ON`, OFF by default so normal builds stay
+dependency-free) shows the allocator working live. It links only the
+allocator core — no `new`/`delete` override — and drives the demo
+workload through `ThreadPoolAlloc` directly. Three windows render each
+frame:
+
+- **Global Stats** — aggregated `requested`/`allocated`/`peak`/counts, a
+  smoothed alloc+free ops/sec readout, a rolling plot of allocated bytes,
+  and a per-size-class histogram of live bytes.
+- **Per-Thread Pools** — one collapsible section per live thread, with a
+  used/cap bar for each of the seven size classes plus the arena.
+- **Event Feed** — the most recent operations from the instrumentation ring
+  (`viz_hook.hpp`): green `alloc`, red `free`, and YELLOW `chunk +64KiB`
+  lines when a thread exhausts a pool and the central-heap slow path
+  refills it.
+
+Build and run (fetches GLFW 3.4 and Dear ImGui v1.90.9 via FetchContent —
+internet required):
+
+```sh
+cmake -B build-viz -DMEMALLOC_BUILD_VIZ=ON
+cmake --build build-viz --config Release
+./build-viz/Release/memalloc_viz.exe
+```
+
+![Visualizer](assets/viz_screenshot.png)
 
 ## Design analysis
 
